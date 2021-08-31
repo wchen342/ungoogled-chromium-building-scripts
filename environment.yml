@@ -1,0 +1,6 @@
+name: ungoogled-chromium-build
+dependencies:
+- python>=3.6
+- pip
+- pip:
+    - -r file:requirements.txt
