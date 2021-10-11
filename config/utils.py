@@ -1,8 +1,9 @@
+import logging
 import multiprocessing as mp
 import os
+import sys
 
-OUTPUT_DIR = os.path.join(
-    os.path.abspath(os.path.join(os.path.split(__file__)[0], '..')), "src", "out")
+from config.constants import OUTPUT_DIR
 
 
 def build_config(args):
@@ -34,3 +35,20 @@ def build_config(args):
     }
 
     return config
+
+
+def create_logger(level=logging.INFO, stream=sys.stdout, filename=None):
+    FORMAT = '%(asctime)s %(message)s'
+    if filename:
+        logging.basicConfig(format=FORMAT, level=level,
+                            filename=filename, encoding='utf-8')
+    else:
+        logging.basicConfig(format=FORMAT, level=level, stream=stream)
+    return logging.getLogger('build_root')
+
+
+def shell_expand_abs_path(path):
+    """
+    Expand $HOME and environment variables in path.
+    """
+    return os.path.abspath(os.path.expandvars(os.path.expanduser(path)))

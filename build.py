@@ -9,61 +9,82 @@ import subprocess as sp
 
 import distro
 
-from config.utils import build_config, OUTPUT_DIR
-from config.versions import chromium_version
+from config import OUTPUT_DIR, SRC_DIR, ARCH, OS, COMMAND
+from config import build_config, create_logger, shell_expand_abs_path
+from config import chromium_version
 
-# User-defined Variables
-ARCH = ('arm', 'arm64', 'x86', 'x64')
-COMMAND = ('init', 'sync', 'prepare', 'build', 'clean')
-OS = ('linux', 'android')
+# Logging
+logger = create_logger(level=logging.DEBUG)
 
 
-def clean(output_dir):
+def clean(config):
     """
     Clean output directory.
-    :param output_dir: path to output dir.
     """
-    sp.check_call(['rm', '-rf', output_dir])
+    if config.output_dir and shell_expand_abs_path(config.output_dir) != shell_expand_abs_path(
+            OUTPUT_DIR) and os.path.exists(config.output_dir):
+        reply = input(
+            "WARNING: you are about to remove an output directory which is different from the default location. "
+            "Are you sure you want ot remove {}? [y/n]: ".format(
+                os.path.abspath(config.output_dir)))
+        if reply == 'y':
+            sp.check_call(['rm', '-rf', config.output_dir])
 
 
-def set_revision(shallow=False, hard_reset=False):
-    """
-    Update chromium source to needed revision.
-    :param shallow: whether do a shallow clone. Ignored if src folder already exists.
-    :param hard_reset: whether do a hard reset before update.
-    """
-    src_dir = 'src'
+def init(config):
+    # Setup depot tools
+    cwd = 'depot_tools'
+    print("Cloning depot_tools...")
+    if os.path.exists(cwd):
+        shutil.rmtree(cwd)
+    sp.check_call(['git', 'clone', 'https://chromium.googlesource.com/chromium/tools/depot_tools.git'])
+    sp.check_call(['git', 'clean', '-fxd'], cwd=cwd)
+    sp.check_call(['git', 'reset', '--hard'], cwd=cwd)
+
+    # Clone chromium src
     clone_cmd = ['git', 'clone']
-    if shallow:
+    if config['shallow']:
         clone_cmd += ['--depth', '1', '--no-tags']
     print("Checking out chromium src...")
+    if os.path.exists(SRC_DIR):
+        logging.warning("Init: src folder already exists! Removing %s first.", os.path.abspath(SRC_DIR))
+        shutil.rmtree(SRC_DIR)
+    sp.check_call(clone_cmd + [
+        'https://chromium.googlesource.com/chromium/src.git',
+        '-b',
+        chromium_version])
 
+
+def set_revision(hard_reset=False):
+    """
+    Update chromium source to needed revision.
+    :param hard_reset: whether do a hard reset before update.
+    """
     # Check current checked out version
+    cwd = SRC_DIR
+
+    # Check whether the repo is shallow
+    shallow = sp.run(['git', 'rev-parse', '--is-shallow-repository'], cwd=cwd, encoding='utf8')
+    if shallow.returncode != 0 or shallow.stdout == 'true':
+        # Fail on shallow repo
+        raise RuntimeError("Cannot set revision on a shallow repository!")
+
     # Do not catch git exception here because any error shall stop further steps
-    if os.path.exists(src_dir) and os.path.isdir(src_dir):
-        cwd = src_dir
-        rev = sp.check_output(['git', 'rev-parse', 'HEAD'], cwd=cwd, encoding='utf8')
-        tag = sp.run(['git', 'describe', '--tags', '--exact-match', rev], cwd=cwd, encoding='utf8')
-        if tag.returncode != 0 or tag.stdout != chromium_version:
-            msg = "Current chromium commit is at " + rev + "(\x1B[3mtag: "
-            if tag.returncode == 0:
-                msg += tag.stdout
-            msg += "\x1B[0m)."
-            logging.info(msg + ', updating to \x1B[3mtag: ' + chromium_version + '\x1B[0m.')
-            if hard_reset:
-                sp.check_call(['git', 'clean', '-fxd'], cwd=cwd)
-                sp.check_call(['git', 'reset', '--hard'], cwd=cwd)
-            sp.check_call(['git', 'pull'], cwd=cwd)
-            sp.check_call(['git', 'checkout', chromium_version], cwd=cwd)
-        else:
-            logging.info("Current chromium commit is at " + chromium_version + ', no need to update.')
+    rev = sp.check_output(['git', 'rev-parse', 'HEAD'], cwd=cwd, encoding='utf8')
+    tag = sp.run(['git', 'describe', '--tags', '--exact-match', rev], cwd=cwd, encoding='utf8')
+    if tag.returncode != 0 or tag.stdout != chromium_version:
+        msg = "Current chromium commit is at " + rev + "(\x1B[3mtag: "
+        if tag.returncode == 0:
+            msg += tag.stdout
+        msg += "\x1B[0m)."
+        logging.info(msg + ', updating to \x1B[3mtag: ' + chromium_version + '\x1B[0m.')
+        if hard_reset:
+            sp.check_call(['git', 'clean', '-fxd'], cwd=cwd)
+            sp.check_call(['git', 'reset', '--hard'], cwd=cwd)
+        sp.check_call(['git', 'pull'], cwd=cwd)
+        sp.check_call(['git', 'checkout', chromium_version], cwd=cwd)
     else:
-        print("Cloning chromium source..")
-        shutil.rmtree('src')
-        sp.check_call(clone_cmd + [
-            'https://chromium.googlesource.com/chromium/src.git',
-            '-b',
-            chromium_version])
+        logging.info("Current chromium commit is at " + chromium_version + ', no need to update.')
 
 
 def list_submodules():
@@ -111,15 +132,6 @@ def sync(shallow=False, hard_reset=False, install_deps=False, config=None):
     if config is None:
         raise RuntimeError("Config not exist for build!")
 
-    # Setup depot tools
-    cwd = 'depot_tools'
-    print("Cloning depot_tools...")
-    if os.path.exists(cwd):
-        shutil.rmtree(cwd)
-    sp.check_call(['git', 'clone', 'https://chromium.googlesource.com/chromium/tools/depot_tools.git'])
-    sp.check_call(['git', 'clean', '-fxd'], cwd=cwd)
-    sp.check_call(['git', 'reset', '--hard'], cwd=cwd)
-
     # Fetch & Sync Chromium
     # Copy PATH from current process and add depot_tools to it
     _env = os.environ.copy()
@@ -149,19 +161,6 @@ def sync(shallow=False, hard_reset=False, install_deps=False, config=None):
 
     # Run hooks
     sp.check_call(['gclient', 'runhooks'], env=_env)
-
-
-def default_python_version():
-    python_v = re.match(r"^Python ([2|3]{1})(?:\.[0-9]{1})+",
-                        sp.check_output(['python', '--version'], encoding='utf8'))
-    if python_v != '2' and python_v != '3':
-        raise FileNotFoundError("Cannot get python version on this system")
-    return python_v
-
-
-def python2_executable():
-    python2_path = sp.check_output(['command -v python2'], encoding='utf8')
-    return python2_path
 
 
 def prepare(config=None):
@@ -224,16 +223,6 @@ def prepare(config=None):
             os.path.join('platforms', 'ungoogled-chromium-android', 'domain_sub_2.list'),
             '-c', domain_substitution_cache_file, 'src'
         ])
-
-    # Change shebang in all relevant files in source directory and all subdirectories
-    python_version = default_python_version()
-    python2_path = python2_executable()
-    if python_version == '3':
-        sp.check_call([
-            'find', '-type', 'f', '-exec', 'sed', '-iE',
-            "'1s=^#! */usr/bin/\(python\|env python\)[23]\?=#!" + python2_path + "='",
-            '{}',
-            '+'])
 
 
 def build(config=None):
@@ -313,11 +302,10 @@ def build(config=None):
     cwd = 'src'
     sp.check_call([
         os.path.join('src', 'tools', 'gn', 'bootstrap', 'bootstrap.py'),
-        '--gn-gen-args=\'' + gn_args_str + '\''], cwd=cwd)
+        "--gn-gen-args='" + gn_args_str + "'"], cwd=cwd)
     sp.check_call([
         os.path.join('depot_tools', 'gn'),
-        '--script-executable=' + python2_executable(), 'gen',
-        '--args=\'' + gn_args_str + '\'',
+        'gen', "--args='" + gn_args_str + "'",
         output_path
     ], cwd=cwd)
 
@@ -373,7 +361,18 @@ if __name__ == "__main__":
                        help='Reset chromium source for sync')
 
     args = parser.parse_args()
-    print(args)
+    logger.debug('args: %s', args)
 
     config = build_config(args)
-    print(config)
+    logger.debug('config: %s', config)
+
+    if args.command == 'init':
+        init(config)
+    elif args.command == 'sync':
+        sync(config)
+    elif args.command == 'prepare':
+        prepare(config)
+    elif args.command == 'build':
+        build(config)
+    elif args.command == 'clean':
+        clean(config)
