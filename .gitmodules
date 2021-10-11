@@ -1,6 +1,0 @@
-[submodule "ungoogled-chromium"]
-	path = ungoogled-chromium
-	url = https://github.com/Eloston/ungoogled-chromium.git
-[submodule "platforms/ungoogled-chromium-android"]
-	path = platforms/ungoogled-chromium-android
-	url = https://github.com/ungoogled-software/ungoogled-chromium-android.git
