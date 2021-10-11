@@ -9,13 +9,13 @@ import subprocess as sp
 
 import distro
 
+from config.utils import build_config, OUTPUT_DIR
 from config.versions import chromium_version
 
 # User-defined Variables
-ARCH = ('arm' 'arm64' 'x86' 'x64')
-COMMAND = ('build', 'prepare', 'sync', 'clean')
+ARCH = ('arm', 'arm64', 'x86', 'x64')
+COMMAND = ('init', 'sync', 'prepare', 'build', 'clean')
 OS = ('linux', 'android')
-OUTPUT_DIR = os.path.join(os.getcwd(), "src", "out")
 
 
 def clean(output_dir):
@@ -341,40 +341,39 @@ if __name__ == "__main__":
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         allow_abbrev=False)
     parser.add_argument('command',
-                        type=str,
+                        type=str, choices=COMMAND,
                         help='Command to run, can be one of '
-                             + ' '.join(COMMAND))
-    parser.add_argument('-a', '--arch', type=str, default=ARCH[0],
-                        help='<arch> can be one of ' + ' '.join(ARCH))
-    parser.add_argument('-g', '--gn-args', type=str, help='GN build arguments')
+                             + '|'.join(COMMAND))
+
+    parser.add_argument('-a', '--arch', type=str, default=ARCH[0], choices=ARCH,
+                        help='arch can be one of ' + '|'.join(ARCH))
+    parser.add_argument('-g', '--gn-args', type=str,
+                        help='GN build arguments override in the format of key1=value1;key2=value2;')
     parser.add_argument('-o', '--output-dir', type=str, default=OUTPUT_DIR,
                         help='path for build output. Defaults to src/out')
     parser.add_argument('-p', '--patches-dir', type=str,
                         help='path to a directory containing patches')
-    parser.add_argument('-s', '--os', type=str, default=OS[0],
-                        help='OS can be one of: ' + ' '.join(OS))
+    parser.add_argument('-s', '--os', type=str, default=OS[0], choices=OS,
+                        help='OS can be one of: ' + '|'.join(OS))
     parser.add_argument('--cc_wrapper', type=str,
                         help='Set cc_wrapper for build.')
+    parser.add_argument('--debug', action='store_true',
+                        help='Build debug builds')
+    parser.add_argument('--install-build-deps', action='store_true',
+                        help="Run chromium's install-build-deps(-android).sh during sync")
+    parser.add_argument('--skip-failed-patches', action='store_true',
+                        help="Don't exit on failed patch attempts")
+
     group = parser.add_mutually_exclusive_group()
+    group.add_argument('--direct-download', action='store_true',
+                       help='Use source from https://commondatastorage.googleapis.com/chromium-browser-official')
     group.add_argument('--shallow', action='store_true',
                        help='Do not clone git history for chromium source')
     group.add_argument('--reset', action='store_true',
-                       help='Hard reset chromium source for sync')
-    parser.add_argument('--debug', action='store_true',
-                        help='Build debug builds')
-    parser.add_argument('--no-skip-patches', action='store_true',
-                        help='Exit on failed patch attempts')
-    parser.add_argument('--install-build-deps', action='store_true',
-                        help="Run chromium's install-build-deps(-android).sh during sync")
+                       help='Reset chromium source for sync')
+
     args = parser.parse_args()
     print(args)
 
-    # Build config
-    config = {
-        'debug': args.debug,
-        'output_base_path': os.path.join('src', 'out'),
-        'cc_wrapper': None,
-        'target_os': 'linux',
-        'target_cpu': 'x86',
-        'num_jobs': 16,
-    }
+    config = build_config(args)
+    print(config)
