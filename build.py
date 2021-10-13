@@ -10,7 +10,7 @@ import warnings
 
 import distro
 
-from config import OUTPUT_DIR, SRC_DIR, ARCH, OS, COMMAND, Config
+from config import OUTPUT_DIR, SRC_DIR, ARCH, OS, COMMAND, Config, GCLIENT_CONFIG
 from config import create_logger, shell_expand_abs_path
 from config import chromium_version
 
@@ -147,6 +147,10 @@ def sync(config):
     # Get chromium ref
     # Set src HEAD to version
     chromium_ref = set_revision(config)
+
+    # Create .gclient file
+    with open('.gclient', 'w', encoding='utf-8') as f:
+        f.write(GCLIENT_CONFIG.replace("@@TARGET_OS@@", "'{}'".format(config.target_os)))
 
     # Run gclient sync without hooks
     extra_args = ['--with_tags', '--with_branch_heads']
