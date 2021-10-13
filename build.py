@@ -6,11 +6,12 @@ import os
 import re
 import shutil
 import subprocess as sp
+import warnings
 
 import distro
 
-from config import OUTPUT_DIR, SRC_DIR, ARCH, OS, COMMAND
-from config import build_config, create_logger, shell_expand_abs_path
+from config import OUTPUT_DIR, SRC_DIR, ARCH, OS, COMMAND, Config
+from config import create_logger, shell_expand_abs_path
 from config import chromium_version
 
 # Logging
@@ -43,11 +44,11 @@ def init(config):
 
     # Clone chromium src
     clone_cmd = ['git', 'clone']
-    if config['shallow']:
+    if config.shallow:
         clone_cmd += ['--depth', '1', '--no-tags']
     print("Checking out chromium src...")
     if os.path.exists(SRC_DIR):
-        logging.warning("Init: src folder already exists! Removing %s first.", os.path.abspath(SRC_DIR))
+        logging.warning("Init: src folder already exists! Removing %s.", os.path.abspath(SRC_DIR))
         shutil.rmtree(SRC_DIR)
     sp.check_call(clone_cmd + [
         'https://chromium.googlesource.com/chromium/src.git',
@@ -55,30 +56,33 @@ def init(config):
         chromium_version])
 
 
-def set_revision(hard_reset=False):
+def set_revision(config):
     """
     Update chromium source to needed revision.
-    :param hard_reset: whether do a hard reset before update.
     """
     # Check current checked out version
     cwd = SRC_DIR
 
+    # Get current revision
+    rev = sp.check_output(['git', 'rev-parse', 'HEAD'], cwd=cwd, encoding='utf8').strip()
+    if config.shallow:
+        return rev
+
     # Check whether the repo is shallow
-    shallow = sp.run(['git', 'rev-parse', '--is-shallow-repository'], cwd=cwd, encoding='utf8')
-    if shallow.returncode != 0 or shallow.stdout == 'true':
+    shallow = sp.check_output(['git', 'rev-parse', '--is-shallow-repository'], cwd=cwd, encoding='utf8').strip()
+    if shallow == 'true':
         # Fail on shallow repo
         raise RuntimeError("Cannot set revision on a shallow repository!")
 
     # Do not catch git exception here because any error shall stop further steps
-    rev = sp.check_output(['git', 'rev-parse', 'HEAD'], cwd=cwd, encoding='utf8')
-    tag = sp.run(['git', 'describe', '--tags', '--exact-match', rev], cwd=cwd, encoding='utf8')
-    if tag.returncode != 0 or tag.stdout != chromium_version:
+    tag = sp.run(['git', 'describe', '--tags', '--exact-match', rev], cwd=cwd, encoding='utf8', capture_output=True)
+    if tag.returncode != 0 or tag.stdout.strip() != chromium_version:
         msg = "Current chromium commit is at " + rev + "(\x1B[3mtag: "
         if tag.returncode == 0:
             msg += tag.stdout
         msg += "\x1B[0m)."
         logging.info(msg + ', updating to \x1B[3mtag: ' + chromium_version + '\x1B[0m.')
-        if hard_reset:
+        if config.reset:
             sp.check_call(['git', 'clean', '-fxd'], cwd=cwd)
             sp.check_call(['git', 'reset', '--hard'], cwd=cwd)
         sp.check_call(['git', 'pull'], cwd=cwd)
@@ -86,13 +90,16 @@ def set_revision(hard_reset=False):
     else:
         logging.info("Current chromium commit is at " + chromium_version + ', no need to update.')
 
+    new_rev = sp.check_output(['git', 'rev-parse', 'HEAD'], cwd=cwd, encoding='utf8').strip()
+    return new_rev
+
 
 def list_submodules():
     """
     List submodule names in current repo
     """
     submodule_names = []
-    stages = sp.check_output(['git', 'ls-files', '--stage'], encoding='utf8')
+    stages = sp.check_output(['git', 'ls-files', '--stage'], encoding='utf8').strip()
     submodules_list = re.findall(r"^160000", stages, flags=re.MULTILINE)
     logging.debug("Found submodules: " + '\n'.join(submodules_list))
     for submodule in submodules_list:
@@ -101,7 +108,7 @@ def list_submodules():
     return submodule_names
 
 
-def update_dependencies(hard_reset=False):
+def update_submodules(hard_reset=False):
     """
     Update submodules.
     """
@@ -110,7 +117,7 @@ def update_dependencies(hard_reset=False):
 
     submodules = list_submodules()
 
-    # probe git exists in submodules
+    # probe .git exists in submodules
     for submodule in submodules:
         logging.info(submodule + ' is at commit ',
                      sp.check_call(['git', 'rev-parse', 'HEAD'],
@@ -125,58 +132,61 @@ def update_dependencies(hard_reset=False):
     sp.check_call(['git', 'submodule', 'update', '--init', '--recursive'])
 
 
-def sync(shallow=False, hard_reset=False, install_deps=False, config=None):
+def sync(config):
     """
     Sync chromium source and run hooks.
     """
-    if config is None:
-        raise RuntimeError("Config not exist for build!")
-
     # Fetch & Sync Chromium
     # Copy PATH from current process and add depot_tools to it
+    depot_tools_path = os.path.join(os.getcwd(), 'depot_tools')
+    if not os.path.exists(depot_tools_path) or not os.path.isdir(depot_tools_path):
+        raise FileNotFoundError("Cannot find depot_tools!")
     _env = os.environ.copy()
-    _env["PATH"] = os.path.join(os.getcwd(), 'depot_tools') + ":" + _env["PATH"]
+    _env["PATH"] = depot_tools_path + ":" + _env["PATH"]
 
     # Get chromium ref
-    chromium_ref = sp.check_output(['git', 'rev-parse', 'HEAD'], cwd='src', encoding='utf8')
+    # Set src HEAD to version
+    chromium_ref = set_revision(config)
 
-    # Run sync without hooks
-    extra_args = []
-    if hard_reset:
-        extra_args += ['--revision', 'src@' + chromium_ref, '--force', '--with_tags', '--with_branch_heads',
-                       '--upstream']
-    if shallow:
-        extra_args += ['--no-history', '--shallow']
-    sp.check_call(['gclient', 'sync', '--reset', '--nohooks'] + extra_args, env=_env)
-
-    # If Debian/Ubuntu and install_deps, then run the script.
-    # Note: requires sudo
-    if config['target_os'] == 'android':
-        script = 'install-build-deps-android.sh'
-    else:
-        script = 'install-build-deps.sh'
-    distro_name = distro.linux_distribution(full_distribution_name=False)[0].lower()
-    if (distro_name == 'debian' or distro_name == 'ubuntu') and install_deps:
-        sp.check_call(['sudo', os.path.join('src', 'build', script)])
+    # Run gclient sync without hooks
+    extra_args = ['--with_tags', '--with_branch_heads']
+    if config.reset:
+        extra_args += ['--revision', 'src@' + chromium_ref, '--force', '--upstream', '--reset']
+    if config.shallow:
+        extra_args = ['--no-history', '--shallow']    # ignore other options
+    sp.check_call(['gclient', 'sync', '--nohooks'] + extra_args, env=_env)
 
     # Run hooks
     sp.check_call(['gclient', 'runhooks'], env=_env)
 
+    # If Debian/Ubuntu and install_deps, then run the script.
+    # Note: requires sudo
+    if config.install_build_deps:
+        warnings.warn("Note: installing dependencies requires root privilege!",
+                      RuntimeWarning)
+        if config.target_os == 'android':
+            script = 'install-build-deps-android.sh'
+        else:
+            script = 'install-build-deps.sh'
+        distro_name = distro.linux_distribution(full_distribution_name=False)[0].lower()
+        if distro_name == 'debian' or distro_name == 'ubuntu':
+            sp.check_call(['sudo', os.path.join(SRC_DIR, 'build', script)])
+        else:
+            warnings.warn("Installing dependencies only works on Debian based systems, skipping.",
+                          RuntimeWarning)
 
-def prepare(config=None):
+
+def prepare(config):
     """
-    Run ungoogled-chromium scripts, apply patches.
+    Pull ungoogled-chromium repositories, run scripts and apply patches.
     TODO: add a patch list filter
     """
-    if config is None:
-        raise RuntimeError("Config not exist for build!")
-
     domain_substitution_cache_file = "domsubcache.tar.gz"
     if os.path.exists(domain_substitution_cache_file) and os.path.isfile(domain_substitution_cache_file):
         os.remove(domain_substitution_cache_file)
 
     # Patch ungoogled-chromium for android
-    if config['target_os'] == 'android':
+    if config.target_os == 'android':
         sp.check_call(['patch', '-p1', '--ignore-whitespace', '-i',
                        os.path.join(
                            'ungoogled-chromium-android', 'patches',
@@ -203,7 +213,7 @@ def prepare(config=None):
         '-c', domain_substitution_cache_file, 'src'
     ])
 
-    if config['target_os'] == 'android':
+    if config.target_os == 'android':
         if os.path.exists(domain_substitution_cache_file) and os.path.isfile(domain_substitution_cache_file):
             os.remove(domain_substitution_cache_file)
 
@@ -225,27 +235,14 @@ def prepare(config=None):
         ])
 
 
-def build(config=None):
+def build(config):
     """
     Run build for given targets.
-    :param config: A dict contains necessary configs. For example:
-
-    config = {
-        'debug': False,
-        'output_base_path': os.path.join('src', 'out'),
-        'cc_wrapper': None,
-        'target_os': 'linux',
-        'target_cpu': 'x86',
-        'num_jobs': 16,
-    }
     """
-    if config is None:
-        raise RuntimeError("Config not exist for build!")
-
     # Create output folder if not exist
-    release_channel = 'Release' if not config['debug'] else 'Debug'
-    output_folder = release_channel + '_' + config['target_os'] + '_' + config['target_cpu']
-    output_path = os.path.join(config['output_base_path'], output_folder)
+    release_channel = 'Release' if not config.debug else 'Debug'
+    output_folder = release_channel + '_' + config.target_os + '_' + config.target_cpu
+    output_path = config.output_dir
     if os.path.exists(output_path):
         if not os.path.isdir(output_path):
             os.remove(output_path)
@@ -277,21 +274,21 @@ def build(config=None):
         'exclude_unwind_tables': 'false',
         'enable_feed_v2': 'false',
         'enable_feed_v2_modern': 'false',
-        'target_os': config['target_os'],
+        'target_os': config.target_os,
     })
 
-    if config['debug']:
+    if config.debug:
         gn_args['is_debug'] = 'true'
         gn_args['is_unsafe_developer_build'] = 'true'
     else:
         gn_args['symbol_level'] = '0'
         gn_args['blink_symbol_level'] = '0'
 
-    if config['cc_wrapper'] is not None:
-        gn_args['cc_wrapper'] = config['cc_wrapper']
+    if config.cc_wrapper is not None:
+        gn_args['cc_wrapper'] = config.cc_wrapper
 
-    if config['target_cpu'] is not None:
-        gn_args['target_cpu'] = config['target_cpu']
+    if config.target_cpu is not None:
+        gn_args['target_cpu'] = config.target_cpu
 
     # Assemble args
     gn_args_str = ""
@@ -310,15 +307,15 @@ def build(config=None):
     ], cwd=cwd)
 
     # Run ninja
-    if config['target_os'] == 'linux':
+    if config.target_os == 'linux':
         targets = ['chrome', 'chrome_sandbox', 'chromedriver']
-    elif config['target_os'] == 'android':
+    elif config.target_os == 'android':
         targets = ['chrome_modern_public_bundle']
     else:
         targets = []
     sp.check_call([
         os.path.join('depot_tools', 'autoninja'),
-        '-j', config['num_jobs'], '-C', output_path,
+        '-j', config.num_jobs, '-C', output_path,
         *targets
     ], cwd=cwd)
 
@@ -363,7 +360,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     logger.debug('args: %s', args)
 
-    config = build_config(args)
+    config = Config(args)
     logger.debug('config: %s', config)
 
     if args.command == 'init':
