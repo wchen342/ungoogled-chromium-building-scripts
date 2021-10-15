@@ -10,7 +10,8 @@ import warnings
 
 import distro
 
-from config import OUTPUT_DIR, SRC_DIR, ARCH, OS, COMMAND, Config, GCLIENT_CONFIG
+from config import OUTPUT_BASE_DIR, SRC_DIR, ARCH, OS, COMMAND, Config, GCLIENT_CONFIG, ungoogled_chromium_version, \
+    ungoogled_chromium_android_version, parse_gn_flags, filter_list_file, git_maybe_checkout
 from config import create_logger, shell_expand_abs_path
 from config import chromium_version
 
@@ -22,14 +23,17 @@ def clean(config):
     """
     Clean output directory.
     """
-    if config.output_dir and shell_expand_abs_path(config.output_dir) != shell_expand_abs_path(
-            OUTPUT_DIR) and os.path.exists(config.output_dir):
-        reply = input(
-            "WARNING: you are about to remove an output directory which is different from the default location. "
-            "Are you sure you want ot remove {}? [y/n]: ".format(
-                os.path.abspath(config.output_dir)))
-        if reply == 'y':
-            sp.check_call(['rm', '-rf', config.output_dir])
+    if os.path.exists(config.output_base_dir):
+        if shell_expand_abs_path(config.output_base_dir) != shell_expand_abs_path(
+                OUTPUT_BASE_DIR):
+            reply = input(
+                "WARNING: you are about to remove an output directory which is different from the default location. "
+                "Are you sure you want ot remove {}? [y/n]: ".format(
+                    os.path.abspath(config.output_base_dir)))
+            if reply != 'y':
+                return
+
+        sp.check_call(['rm', '-rf', config.output_base_dir])
 
 
 def init(config):
@@ -38,9 +42,9 @@ def init(config):
     print("Cloning depot_tools...")
     if os.path.exists(cwd):
         shutil.rmtree(cwd)
-    sp.check_call(['git', 'clone', 'https://chromium.googlesource.com/chromium/tools/depot_tools.git'])
-    sp.check_call(['git', 'clean', '-fxd'], cwd=cwd)
-    sp.check_call(['git', 'reset', '--hard'], cwd=cwd)
+    git_maybe_checkout(
+        'https://chromium.googlesource.com/chromium/tools/depot_tools.git',
+        cwd)
 
     # Clone chromium src
     clone_cmd = ['git', 'clone']
@@ -52,8 +56,7 @@ def init(config):
         shutil.rmtree(SRC_DIR)
     sp.check_call(clone_cmd + [
         'https://chromium.googlesource.com/chromium/src.git',
-        '-b',
-        chromium_version])
+        '-b', chromium_version])
 
 
 def set_revision(config):
@@ -153,11 +156,16 @@ def sync(config):
         f.write(GCLIENT_CONFIG.replace("@@TARGET_OS@@", "'{}'".format(config.target_os)))
 
     # Run gclient sync without hooks
-    extra_args = ['--with_tags', '--with_branch_heads']
+    extra_args = []
     if config.reset:
         extra_args += ['--revision', 'src@' + chromium_ref, '--force', '--upstream', '--reset']
     if config.shallow:
-        extra_args = ['--no-history', '--shallow']    # ignore other options
+        # There is a bug with --no-history when syncing third_party/wayland. See
+        # https://bugs.chromium.org/p/chromium/issues/detail?id=1226496
+        extra_args += ['--shallow']
+    else:
+        extra_args += ['--with_tags', '--with_branch_heads']
+
     sp.check_call(['gclient', 'sync', '--nohooks'] + extra_args, env=_env)
 
     # Run hooks
@@ -166,14 +174,14 @@ def sync(config):
     # If Debian/Ubuntu and install_deps, then run the script.
     # Note: requires sudo
     if config.install_build_deps:
-        warnings.warn("Note: installing dependencies requires root privilege!",
-                      RuntimeWarning)
         if config.target_os == 'android':
             script = 'install-build-deps-android.sh'
         else:
             script = 'install-build-deps.sh'
         distro_name = distro.linux_distribution(full_distribution_name=False)[0].lower()
         if distro_name == 'debian' or distro_name == 'ubuntu':
+            warnings.warn("Note: installing dependencies requires root privilege!",
+                          RuntimeWarning)
             sp.check_call(['sudo', os.path.join(SRC_DIR, 'build', script)])
         else:
             warnings.warn("Installing dependencies only works on Debian based systems, skipping.",
@@ -183,60 +191,57 @@ def sync(config):
 def prepare(config):
     """
     Pull ungoogled-chromium repositories, run scripts and apply patches.
+    Note: for Android, this will use bundled SDK and NDK, not the rebuilds
     TODO: add a patch list filter
     """
-    domain_substitution_cache_file = "domsubcache.tar.gz"
-    if os.path.exists(domain_substitution_cache_file) and os.path.isfile(domain_substitution_cache_file):
-        os.remove(domain_substitution_cache_file)
-
-    # Patch ungoogled-chromium for android
+    # Checkout ungoogled-chromium
+    git_maybe_checkout(
+        'https://github.com/Eloston/ungoogled-chromium.git',
+        'ungoogled-chromium',
+        branch=ungoogled_chromium_version, reset=True)
     if config.target_os == 'android':
+        git_maybe_checkout(
+            'https://github.com/ungoogled-software/ungoogled-chromium-android.git',
+            'ungoogled-chromium-android',
+            branch=ungoogled_chromium_android_version, reset=True)
         sp.check_call(['patch', '-p1', '--ignore-whitespace', '-i',
-                       os.path.join(
-                           'ungoogled-chromium-android', 'patches',
-                           'Other', 'ungoogled-main-repo-fix.patch'),
-                       '--no-backup-if-mismatch'],
-                      cwd='platforms')
+                       os.path.join('ungoogled-chromium-android', 'patches', 'Other', 'ungoogled-main-repo-fix.patch'),
+                       '--no-backup-if-mismatch'])
+
+    domain_substitution_cache_file = "domsubcache.tar.gz"
+    if os.path.exists(domain_substitution_cache_file):
+        os.remove(domain_substitution_cache_file)
 
     # ungoogled-chromium scripts
     # Do not check here because prune script return non-zero for non-existing files
-    sp.run([
-        os.path.join('ungoogled-chromium', 'utils', 'prune_binaries.py'),
-        'src',
-        os.path.join('ungoogled-chromium', 'pruning.list')])
-    sp.check_call([
-        os.path.join('ungoogled-chromium', 'utils', 'patches.py'),
-        'apply', 'src',
-        os.path.join('ungoogled-chromium', 'patches')])
-    sp.check_call([
-        os.path.join('ungoogled-chromium', 'utils', 'domain_substitution.py'),
-        'apply', '-r',
-        os.path.join('ungoogled-chromium', 'domain_regex.list'),
-        '-f',
-        os.path.join('ungoogled-chromium', 'domain_substitution.list'),
-        '-c', domain_substitution_cache_file, 'src'
-    ])
+    cwd = SRC_DIR
+    uc_dir = 'ungoogled-chromium'
+    utils_dir = os.path.join(uc_dir, 'utils')
+    sp.run([os.path.join(utils_dir, 'prune_binaries.py'),
+        SRC_DIR, filter_list_file(
+            uc_dir, 'pruning.list',
+            excludes=['buildtools/linux64/gn'])])
+    sp.check_call([os.path.join(utils_dir, 'patches.py'),
+        'apply', 'src', os.path.join(uc_dir, 'patches')])
+    sp.check_call([os.path.join(utils_dir, 'domain_substitution.py'),
+        'apply', '-r', os.path.join(uc_dir, 'domain_regex.list'),
+        '-f', filter_list_file(uc_dir, 'domain_substitution.list'),
+        '-c', domain_substitution_cache_file, 'src'])
 
+    # ungoogled-chromium-android scripts
     if config.target_os == 'android':
-        if os.path.exists(domain_substitution_cache_file) and os.path.isfile(domain_substitution_cache_file):
+        if os.path.exists(domain_substitution_cache_file):
             os.remove(domain_substitution_cache_file)
 
-        sp.check_call([
-            os.path.join('ungoogled-chromium', 'utils', 'patches.py'),
-            'apply', 'src',
-            os.path.join('platforms', 'ungoogled-chromium-android', 'patches')])
-        sp.run([
-            os.path.join('ungoogled-chromium', 'utils', 'prune_binaries.py'),
-            'src',
-            os.path.join('platforms', 'ungoogled-chromium-android', 'pruning_2.list')])
-        sp.check_call([
-            os.path.join('ungoogled-chromium', 'utils', 'domain_substitution.py'),
-            'apply', '-r',
-            os.path.join('ungoogled-chromium', 'domain_regex.list'),
-            '-f',
-            os.path.join('platforms', 'ungoogled-chromium-android', 'domain_sub_2.list'),
-            '-c', domain_substitution_cache_file, 'src'
-        ])
+        uca_dir = 'ungoogled-chromium-android'
+        sp.run([os.path.join(utils_dir, 'prune_binaries.py'),
+            'src', filter_list_file(uca_dir, 'pruning_2.list')])
+        sp.check_call([os.path.join(utils_dir, 'patches.py'),
+            'apply', 'src', os.path.join(uca_dir, 'patches')])
+        sp.check_call([os.path.join(utils_dir, 'domain_substitution.py'),
+            'apply', '-r', os.path.join(uc_dir, 'domain_regex.list'),
+            '-f', filter_list_file(uca_dir, 'domain_sub_2.list'),
+            '-c', domain_substitution_cache_file, 'src'])
 
 
 def build(config):
@@ -245,70 +250,84 @@ def build(config):
     """
     # Create output folder if not exist
     release_channel = 'Release' if not config.debug else 'Debug'
-    output_folder = release_channel + '_' + config.target_os + '_' + config.target_cpu
-    output_path = config.output_dir
-    if os.path.exists(output_path):
-        if not os.path.isdir(output_path):
-            os.remove(output_path)
-    else:
-        os.makedirs(output_path)
+    output_subfolder = release_channel + '_' + config.target_os + '_' + config.target_cpu
+    output_path = os.path.join(config.output_base_dir, output_subfolder)
+    output_src_path = os.path.join(SRC_DIR, config.output_base_dir, output_subfolder)
+    if os.path.exists(output_src_path):
+        if not os.path.isdir(output_src_path):
+            os.remove(output_src_path)
+    os.makedirs(output_src_path, exist_ok=True)
 
     # Build GN args
-    gn_args = {}
-
     # ungoogled-chromium
-    with open(os.path.join(
-            'ungoogled-chromium', 'flags.gn'
-    ), 'r') as file:
-        for line in file:
-            name, var = line.partition("=")[::2]
-            gn_args[name.strip()] = var.strip()
+    with open(os.path.join('ungoogled-chromium', 'flags.gn'), 'r') as f:
+        flags = f.readlines()
+
+    gn_args = parse_gn_flags(flags)
 
     # Extra flags
+    # Common flags
     gn_args.update({
-        'is_debug': 'false',
-        'is_official_build': 'false',
+        'is_component_build': 'false',
         'is_unsafe_developer_build': 'false',
         'proprietary_codecs': 'true',
         'ffmpeg_branding': '"Chrome"',
-        'branding_path_component': '"ungoogled-chromium"',
-        'enable_widevine': 'false',
         'use_gnome_keyring': 'false',
-        'is_component_build': 'false',
         'exclude_unwind_tables': 'false',
-        'enable_feed_v2': 'false',
-        'enable_feed_v2_modern': 'false',
-        'target_os': config.target_os,
+        'target_os': '"' + config.target_os + '"',
+        'target_cpu': '"' + config.target_cpu + '"',
     })
 
+    # Debug flags
     if config.debug:
-        gn_args['is_debug'] = 'true'
-        gn_args['is_unsafe_developer_build'] = 'true'
+        gn_args.update({
+            'is_debug': 'true',
+            'is_unsafe_developer_build': 'true',
+            'is_official_build': 'false',
+            'symbol_level': '1',
+            'blink_symbol_level': '1',
+        })
     else:
-        gn_args['symbol_level'] = '0'
-        gn_args['blink_symbol_level'] = '0'
+        gn_args.update({
+            'is_debug': 'false',
+            'is_unsafe_developer_build': 'false',
+            'is_official_build': 'true',
+            'symbol_level': '0',
+            'blink_symbol_level': '0',
+        })
 
+    # CC Wrapper
     if config.cc_wrapper is not None:
-        gn_args['cc_wrapper'] = config.cc_wrapper
+        gn_args.update({
+            'cc_wrapper': '"' + config.cc_wrapper + '"',
+        })
 
-    if config.target_cpu is not None:
-        gn_args['target_cpu'] = config.target_cpu
+    # Command line override
+    gn_args.update(config.gn_args)
 
     # Assemble args
     gn_args_str = ""
+    delimiter = ' ' if config.direct_download else '\n'
     for k, v in gn_args.items():
-        gn_args_str += '='.join([k, v]) + ' '
+        gn_args_str += '='.join([k, v]) + delimiter
+
+    # Add depot_tools to env
+    depot_tools_path = os.path.join(os.getcwd(), 'depot_tools')
+    if not os.path.exists(depot_tools_path) or not os.path.isdir(depot_tools_path):
+        raise FileNotFoundError("Cannot find depot_tools!")
+    _env = os.environ.copy()
+    _env["PATH"] = depot_tools_path + ":" + _env["PATH"]
 
     # Run GN
-    cwd = 'src'
-    sp.check_call([
-        os.path.join('src', 'tools', 'gn', 'bootstrap', 'bootstrap.py'),
-        "--gn-gen-args='" + gn_args_str + "'"], cwd=cwd)
-    sp.check_call([
-        os.path.join('depot_tools', 'gn'),
-        'gen', "--args='" + gn_args_str + "'",
-        output_path
-    ], cwd=cwd)
+    if config.direct_download:
+        sp.check_call([
+            os.path.join(SRC_DIR, 'tools', 'gn', 'bootstrap', 'bootstrap.py'),
+            "--gn-gen-args='" + gn_args_str + "'"])
+    else:
+        # Do not use --args. It requires all double quotes be escaped.
+        with open(os.path.join(output_src_path, 'args.gn'), 'w', encoding='utf-8') as f:
+            f.write(gn_args_str)
+        sp.check_call(['gn', 'gen', output_path, '--fail-on-unused-args'], cwd=SRC_DIR, env=_env)
 
     # Run ninja
     if config.target_os == 'linux':
@@ -316,12 +335,9 @@ def build(config):
     elif config.target_os == 'android':
         targets = ['chrome_modern_public_bundle']
     else:
-        targets = []
-    sp.check_call([
-        os.path.join('depot_tools', 'autoninja'),
-        '-j', config.num_jobs, '-C', output_path,
-        *targets
-    ], cwd=cwd)
+        raise AttributeError("Target OS not supported")
+    sp.check_call(['autoninja', '-j', str(config.num_jobs), '-C', output_path,
+        *targets], cwd=SRC_DIR, env=_env)
 
 
 if __name__ == "__main__":
@@ -334,14 +350,13 @@ if __name__ == "__main__":
                         help='Command to run, can be one of '
                              + '|'.join(COMMAND))
 
-    parser.add_argument('-a', '--arch', type=str, default=ARCH[0], choices=ARCH,
+    parser.add_argument('-a', '--arch', type=str, default=ARCH[3], choices=ARCH,
                         help='arch can be one of ' + '|'.join(ARCH))
     parser.add_argument('-g', '--gn-args', type=str,
                         help='GN build arguments override in the format of key1=value1;key2=value2;')
-    parser.add_argument('-o', '--output-dir', type=str, default=OUTPUT_DIR,
-                        help='path for build output. Defaults to src/out')
-    parser.add_argument('-p', '--patches-dir', type=str,
-                        help='path to a directory containing patches')
+    parser.add_argument('-o', '--output-dir', type=str, default=OUTPUT_BASE_DIR,
+                        help='base path for build output relative to {}. Defaults to {}'.format(
+                            SRC_DIR, OUTPUT_BASE_DIR))
     parser.add_argument('-s', '--os', type=str, default=OS[0], choices=OS,
                         help='OS can be one of: ' + '|'.join(OS))
     parser.add_argument('--cc_wrapper', type=str,
@@ -350,15 +365,14 @@ if __name__ == "__main__":
                         help='Build debug builds')
     parser.add_argument('--install-build-deps', action='store_true',
                         help="Run chromium's install-build-deps(-android).sh during sync")
-    parser.add_argument('--skip-failed-patches', action='store_true',
-                        help="Don't exit on failed patch attempts")
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--direct-download', action='store_true',
                        help='Use source from https://commondatastorage.googleapis.com/chromium-browser-official')
     group.add_argument('--shallow', action='store_true',
                        help='Do not clone git history for chromium source')
-    group.add_argument('--reset', action='store_true',
+
+    parser.add_argument('--reset', action='store_true',
                        help='Reset chromium source for sync')
 
     args = parser.parse_args()

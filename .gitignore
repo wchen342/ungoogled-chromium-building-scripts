@@ -1,3 +1,9 @@
 /src/
 /depot_tools/
 /.gclient
+/.gclient_entries
+/_bad_scm/
+/.cipd/
+/ungoogled-chromium/
+/ungoogled-chromium-android/
+/domsubcache.tar.gz

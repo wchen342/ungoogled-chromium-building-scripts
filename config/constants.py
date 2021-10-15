@@ -5,13 +5,13 @@ COMMAND = ('init', 'sync', 'prepare', 'build', 'clean')
 OS = ('linux', 'android')
 
 SRC_DIR = "src"
-OUTPUT_DIR = os.path.join(SRC_DIR, "out")
+OUTPUT_BASE_DIR = os.path.join("out")
 
 GCLIENT_CONFIG = """solutions = [
   {
     "managed": False,
     "name": "src",
-    "url": "https://github.com/chromium/chromium",
+    "url": "https://chromium.googlesource.com/chromium/src.git",
     "custom_deps": {
       "src/third_party/WebKit/LayoutTests": None,
       "src/chrome_frame/tools/test/reference_build/chrome": None,
