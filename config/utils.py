@@ -122,6 +122,7 @@ def git_maybe_checkout(remote, repo_folder, branch=None, reset=False):
     Check if dir is a git working directory. If it exists and is a valid git repository,
     pull and update HEAD. Otherwise do a clean clone.
     branch can be tag.
+    TODO: check origin matches
     """
     remote_name = 'origin'
     valid = git_is_valid_repo(repo_folder)
@@ -153,7 +154,16 @@ def git_is_valid_repo(repo_folder):
     else:
         try:
             sp.check_call(['git', 'rev-parse', '--is-inside-work-tree'], cwd=repo_folder)
+            valid = not git_is_shallow(repo_folder)
         except sp.CalledProcessError as e:
             warnings.warn("{}\n{} is not a valid git repository".format(e, repo_folder))
             valid = False
     return valid
+
+
+def git_is_shallow(repo_folder):
+    """
+    Check whether a git folder is a shallow copy
+    """
+    shallow = sp.check_output(['git', 'rev-parse', '--is-shallow-repository'], cwd=repo_folder, encoding='utf8').strip()
+    return shallow == 'true'

@@ -10,10 +10,12 @@ import warnings
 
 import distro
 
-from config import OUTPUT_BASE_DIR, SRC_DIR, ARCH, OS, COMMAND, Config, GCLIENT_CONFIG, ungoogled_chromium_version, \
-    ungoogled_chromium_android_version, parse_gn_flags, filter_list_file, git_maybe_checkout
-from config import create_logger, shell_expand_abs_path
-from config import chromium_version
+from config import OUTPUT_BASE_DIR, SRC_DIR, ARCH, OS, COMMAND, GCLIENT_CONFIG
+from config import create_logger, shell_expand_abs_path, parse_gn_flags, filter_list_file, git_maybe_checkout, \
+    git_is_shallow
+from config import Config
+from config import chromium_version, ungoogled_chromium_version, ungoogled_chromium_android_version, \
+    ungoogled_chromium_origin
 
 # Logging
 logger = create_logger(level=logging.DEBUG)
@@ -40,23 +42,23 @@ def init(config):
     # Setup depot tools
     cwd = 'depot_tools'
     print("Cloning depot_tools...")
-    if os.path.exists(cwd):
-        shutil.rmtree(cwd)
     git_maybe_checkout(
         'https://chromium.googlesource.com/chromium/tools/depot_tools.git',
         cwd)
 
     # Clone chromium src
-    clone_cmd = ['git', 'clone']
-    if config.shallow:
-        clone_cmd += ['--depth', '1', '--no-tags']
     print("Checking out chromium src...")
-    if os.path.exists(SRC_DIR):
-        logging.warning("Init: src folder already exists! Removing %s.", os.path.abspath(SRC_DIR))
-        shutil.rmtree(SRC_DIR)
-    sp.check_call(clone_cmd + [
-        'https://chromium.googlesource.com/chromium/src.git',
-        '-b', chromium_version])
+    if config.shallow:
+        if os.path.exists(SRC_DIR):
+            logging.warning("Init: src folder already exists! Removing %s.", os.path.abspath(SRC_DIR))
+            shutil.rmtree(SRC_DIR)
+        sp.check_call(['git', 'clone', '--depth', '1', '--no-tags',
+            'https://chromium.googlesource.com/chromium/src.git',
+            '-b', chromium_version])
+    else:
+        git_maybe_checkout(
+            'https://chromium.googlesource.com/chromium/src.git',
+            cwd)
 
 
 def set_revision(config):
@@ -72,8 +74,7 @@ def set_revision(config):
         return rev
 
     # Check whether the repo is shallow
-    shallow = sp.check_output(['git', 'rev-parse', '--is-shallow-repository'], cwd=cwd, encoding='utf8').strip()
-    if shallow == 'true':
+    if git_is_shallow(cwd):
         # Fail on shallow repo
         raise RuntimeError("Cannot set revision on a shallow repository!")
 
@@ -192,11 +193,14 @@ def prepare(config):
     """
     Pull ungoogled-chromium repositories, run scripts and apply patches.
     Note: for Android, this will use bundled SDK and NDK, not the rebuilds
+    TODO: re-apply patches
     TODO: add a patch list filter
     """
     # Checkout ungoogled-chromium
+    uc_git_origin = 'https://github.com/Eloston/ungoogled-chromium.git'\
+        if ungoogled_chromium_origin is None else ungoogled_chromium_origin
     git_maybe_checkout(
-        'https://github.com/Eloston/ungoogled-chromium.git',
+        uc_git_origin,
         'ungoogled-chromium',
         branch=ungoogled_chromium_version, reset=True)
     if config.target_os == 'android':

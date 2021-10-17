@@ -5,7 +5,7 @@ COMMAND = ('init', 'sync', 'prepare', 'build', 'clean')
 OS = ('linux', 'android')
 
 SRC_DIR = "src"
-OUTPUT_BASE_DIR = os.path.join("out")
+OUTPUT_BASE_DIR = "out"
 
 GCLIENT_CONFIG = """solutions = [
   {
