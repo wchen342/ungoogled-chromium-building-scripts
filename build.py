@@ -6,11 +6,16 @@ import os
 import re
 import shutil
 import subprocess as sp
+import sys
 import warnings
+from io import BytesIO
+from pathlib import Path
+from zipfile import ZipFile
 
 import distro
+import requests
 
-from config import OUTPUT_BASE_DIR, SRC_DIR, ARCH, OS, COMMAND, GCLIENT_CONFIG
+from config import OUTPUT_BASE_DIR, SRC_DIR, ARCH, OS, COMMAND, GCLIENT_CONFIG, git_pull_submodules
 from config import create_logger, shell_expand_abs_path, parse_gn_flags, filter_list_file, git_maybe_checkout, \
     git_is_shallow
 from config import Config
@@ -42,23 +47,37 @@ def init(config):
     # Setup depot tools
     cwd = 'depot_tools'
     print("Cloning depot_tools...")
-    git_maybe_checkout(
-        'https://chromium.googlesource.com/chromium/tools/depot_tools.git',
-        cwd)
 
-    # Clone chromium src
-    print("Checking out chromium src...")
-    if config.shallow:
-        if os.path.exists(SRC_DIR):
-            logging.warning("Init: src folder already exists! Removing %s.", os.path.abspath(SRC_DIR))
-            shutil.rmtree(SRC_DIR)
-        sp.check_call(['git', 'clone', '--depth', '1', '--no-tags',
-            'https://chromium.googlesource.com/chromium/src.git',
-            '-b', chromium_version])
+    if config.target_os == 'windows':
+        r = requests.get('https://storage.googleapis.com/chrome-infra/depot_tools.zip')
+        with ZipFile(BytesIO(r.content)) as f:
+            f.extractall(cwd)
+
+        """
+        From a cmd.exe shell, run the command gclient (without arguments). 
+        On first run, gclient will install all the Windows-specific bits needed to work with the code, 
+        including msysgit and python.
+        """
+        gclient_path = Path(f'{cwd}\\gclient.bat')
+        sp.check_call(['cmd', os.path.abspath(gclient_path)])
     else:
         git_maybe_checkout(
-            'https://chromium.googlesource.com/chromium/src.git',
+            'https://chromium.googlesource.com/chromium/tools/depot_tools.git',
             cwd)
+
+        # Clone chromium src
+        print("Checking out chromium src...")
+        if config.shallow:
+            if os.path.exists(SRC_DIR):
+                logging.warning("Init: src folder already exists! Removing %s.", os.path.abspath(SRC_DIR))
+                shutil.rmtree(SRC_DIR)
+            sp.check_call(['git', 'clone', '--depth', '1', '--no-tags',
+                'https://chromium.googlesource.com/chromium/src.git',
+                '-b', chromium_version])
+        else:
+            git_maybe_checkout(
+                'https://chromium.googlesource.com/chromium/src.git',
+                cwd)
 
 
 def set_revision(config):
@@ -140,53 +159,75 @@ def sync(config):
     """
     Sync chromium source and run hooks.
     """
-    # Fetch & Sync Chromium
-    # Copy PATH from current process and add depot_tools to it
-    depot_tools_path = os.path.join(os.getcwd(), 'depot_tools')
-    if not os.path.exists(depot_tools_path) or not os.path.isdir(depot_tools_path):
-        raise FileNotFoundError("Cannot find depot_tools!")
-    _env = os.environ.copy()
-    _env["PATH"] = depot_tools_path + ":" + _env["PATH"]
+    if config.target_os == 'windows':
+        git_maybe_checkout(
+            'https://github.com/ungoogled-software/ungoogled-chromium-windows.git',
+            'ungoogled-chromium-windows')
+        git_pull_submodules('ungoogled-chromium-windows')
+        uc_windows_dir = Path('ungoogled-chromium-windows')
+        sys.path.insert(0, os.path.abspath(uc_windows_dir / 'ungoogled-chromium' / 'utils'))
+        import downloads
+        download_info = downloads.DownloadInfo([
+            uc_windows_dir / 'downloads.ini',
+            uc_windows_dir / 'ungoogled-chromium' / 'downloads.ini',
+        ])
+        downloads_cache = uc_windows_dir / 'build' / 'downloads_cache'
+        downloads_cache.mkdir(parents=True, exist_ok=True)
+        source_tree = uc_windows_dir / 'build' / 'src'
+        source_tree.mkdir(parents=True, exist_ok=True)
 
-    # Get chromium ref
-    # Set src HEAD to version
-    chromium_ref = set_revision(config)
-
-    # Create .gclient file
-    with open('.gclient', 'w', encoding='utf-8') as f:
-        f.write(GCLIENT_CONFIG.replace("@@TARGET_OS@@", "'{}'".format(config.target_os)))
-
-    # Run gclient sync without hooks
-    extra_args = []
-    if config.reset:
-        extra_args += ['--revision', 'src@' + chromium_ref, '--force', '--upstream', '--reset']
-    if config.shallow:
-        # There is a bug with --no-history when syncing third_party/wayland. See
-        # https://bugs.chromium.org/p/chromium/issues/detail?id=1226496
-        extra_args += ['--shallow']
+        downloads.retrieve_downloads(download_info, downloads_cache, True, False)
+        downloads.check_downloads(download_info, downloads_cache)
+        print('Unpacking downloads...')
+        downloads.unpack_downloads(download_info, downloads_cache, source_tree)
     else:
-        extra_args += ['--with_tags', '--with_branch_heads']
+        # Fetch & Sync Chromium
+        # Copy PATH from current process and add depot_tools to it
+        depot_tools_path = os.path.join(os.getcwd(), 'depot_tools')
+        if not os.path.exists(depot_tools_path) or not os.path.isdir(depot_tools_path):
+            raise FileNotFoundError("Cannot find depot_tools!")
+        _env = os.environ.copy()
+        _env["PATH"] = depot_tools_path + ":" + _env["PATH"]
 
-    sp.check_call(['gclient', 'sync', '--nohooks'] + extra_args, env=_env)
+        # Get chromium ref
+        # Set src HEAD to version
+        chromium_ref = set_revision(config)
 
-    # Run hooks
-    sp.check_call(['gclient', 'runhooks'], env=_env)
+        # Create .gclient file
+        with open('.gclient', 'w', encoding='utf-8') as f:
+            f.write(GCLIENT_CONFIG.replace("@@TARGET_OS@@", "'{}'".format(config.target_os)))
 
-    # If Debian/Ubuntu and install_deps, then run the script.
-    # Note: requires sudo
-    if config.install_build_deps:
-        if config.target_os == 'android':
-            script = 'install-build-deps-android.sh'
+        # Run gclient sync without hooks
+        extra_args = []
+        if config.reset:
+            extra_args += ['--revision', 'src@' + chromium_ref, '--force', '--upstream', '--reset']
+        if config.shallow:
+            # There is a bug with --no-history when syncing third_party/wayland. See
+            # https://bugs.chromium.org/p/chromium/issues/detail?id=1226496
+            extra_args += ['--shallow']
         else:
-            script = 'install-build-deps.sh'
-        distro_name = distro.linux_distribution(full_distribution_name=False)[0].lower()
-        if distro_name == 'debian' or distro_name == 'ubuntu':
-            warnings.warn("Note: installing dependencies requires root privilege!",
-                          RuntimeWarning)
-            sp.check_call(['sudo', os.path.join(SRC_DIR, 'build', script)])
-        else:
-            warnings.warn("Installing dependencies only works on Debian based systems, skipping.",
-                          RuntimeWarning)
+            extra_args += ['--with_tags', '--with_branch_heads']
+
+        sp.check_call(['gclient', 'sync', '--nohooks'] + extra_args, env=_env)
+
+        # Run hooks
+        sp.check_call(['gclient', 'runhooks'], env=_env)
+
+        # If Debian/Ubuntu and install_deps, then run the script.
+        # Note: requires sudo
+        if config.install_build_deps:
+            if config.target_os == 'android':
+                script = 'install-build-deps-android.sh'
+            else:
+                script = 'install-build-deps.sh'
+            distro_name = distro.linux_distribution(full_distribution_name=False)[0].lower()
+            if distro_name == 'debian' or distro_name == 'ubuntu':
+                warnings.warn("Note: installing dependencies requires root privilege!",
+                              RuntimeWarning)
+                sp.check_call(['sudo', os.path.join(SRC_DIR, 'build', script)])
+            else:
+                warnings.warn("Installing dependencies only works on Debian based systems, skipping.",
+                              RuntimeWarning)
 
 
 def prepare(config):

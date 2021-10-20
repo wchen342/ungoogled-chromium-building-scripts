@@ -167,3 +167,7 @@ def git_is_shallow(repo_folder):
     """
     shallow = sp.check_output(['git', 'rev-parse', '--is-shallow-repository'], cwd=repo_folder, encoding='utf8').strip()
     return shallow == 'true'
+
+
+def git_pull_submodules(repo_folder):
+    sp.check_call(['git', 'submodule', 'update', '--init', '--recursive'], cwd=repo_folder)
