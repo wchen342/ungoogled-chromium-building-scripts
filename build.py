@@ -5,8 +5,7 @@ import logging
 import os
 import re
 import shutil
-import subprocess as sp
-import sys
+import win_adapter as sp
 import warnings
 from io import BytesIO
 from pathlib import Path
@@ -165,21 +164,23 @@ def sync(config):
             'ungoogled-chromium-windows')
         git_pull_submodules('ungoogled-chromium-windows')
         uc_windows_dir = Path('ungoogled-chromium-windows')
-        sys.path.insert(0, os.path.abspath(uc_windows_dir / 'ungoogled-chromium' / 'utils'))
-        import downloads
-        download_info = downloads.DownloadInfo([
-            uc_windows_dir / 'downloads.ini',
-            uc_windows_dir / 'ungoogled-chromium' / 'downloads.ini',
-        ])
+
+        uc_windows_ini_path = uc_windows_dir / 'downloads.ini'
+        uc_ini_path = uc_windows_dir / 'ungoogled-chromium' / 'downloads.ini',
+
         downloads_cache = uc_windows_dir / 'build' / 'downloads_cache'
         downloads_cache.mkdir(parents=True, exist_ok=True)
-        source_tree = uc_windows_dir / 'build' / 'src'
+        source_tree = Path(SRC_DIR)
+        if source_tree.exists():
+            logging.warning("Init: src folder already exists! Removing %s.", os.path.abspath(SRC_DIR))
+            shutil.rmtree(SRC_DIR)
         source_tree.mkdir(parents=True, exist_ok=True)
 
-        downloads.retrieve_downloads(download_info, downloads_cache, True, False)
-        downloads.check_downloads(download_info, downloads_cache)
+        download_script = os.path.abspath(Path(uc_windows_dir / 'ungoogled-chromium' / 'utils' / 'downloads.py'))
+        sp.check_call([download_script, 'retrieve', '-c', os.path.abspath(downloads_cache), '-i', uc_ini_path, '-i', uc_windows_ini_path])
         print('Unpacking downloads...')
-        downloads.unpack_downloads(download_info, downloads_cache, source_tree)
+        sp.check_call([download_script, 'unpack', '-c', os.path.abspath(downloads_cache),
+                       '-i', uc_ini_path, '-i', uc_windows_ini_path, os.path.abspath(source_tree)])
     else:
         # Fetch & Sync Chromium
         # Copy PATH from current process and add depot_tools to it
@@ -237,21 +238,22 @@ def prepare(config):
     TODO: re-apply patches
     TODO: add a patch list filter
     """
-    # Checkout ungoogled-chromium
-    uc_git_origin = 'https://github.com/Eloston/ungoogled-chromium.git'\
-        if ungoogled_chromium_origin is None else ungoogled_chromium_origin
-    git_maybe_checkout(
-        uc_git_origin,
-        'ungoogled-chromium',
-        branch=ungoogled_chromium_version, reset=True)
-    if config.target_os == 'android':
+    if config.target_os != 'windows':
+        # Checkout ungoogled-chromium
+        uc_git_origin = 'https://github.com/Eloston/ungoogled-chromium.git'\
+            if ungoogled_chromium_origin is None else ungoogled_chromium_origin
         git_maybe_checkout(
-            'https://github.com/ungoogled-software/ungoogled-chromium-android.git',
-            'ungoogled-chromium-android',
-            branch=ungoogled_chromium_android_version, reset=True)
-        sp.check_call(['patch', '-p1', '--ignore-whitespace', '-i',
-                       os.path.join('ungoogled-chromium-android', 'patches', 'Other', 'ungoogled-main-repo-fix.patch'),
-                       '--no-backup-if-mismatch'])
+            uc_git_origin,
+            'ungoogled-chromium',
+            branch=ungoogled_chromium_version, reset=True)
+        if config.target_os == 'android':
+            git_maybe_checkout(
+                'https://github.com/ungoogled-software/ungoogled-chromium-android.git',
+                'ungoogled-chromium-android',
+                branch=ungoogled_chromium_android_version, reset=True)
+            sp.check_call(['patch', '-p1', '--ignore-whitespace', '-i',
+                           os.path.join('ungoogled-chromium-android', 'patches', 'Other', 'ungoogled-main-repo-fix.patch'),
+                           '--no-backup-if-mismatch'])
 
     domain_substitution_cache_file = "domsubcache.tar.gz"
     if os.path.exists(domain_substitution_cache_file):
@@ -260,14 +262,22 @@ def prepare(config):
     # ungoogled-chromium scripts
     # Do not check here because prune script return non-zero for non-existing files
     cwd = SRC_DIR
+    env = None
     uc_dir = 'ungoogled-chromium'
+    if config.target_os == 'windows':
+        uc_dir = 'ungoogled-chromium-windows\\ungoogled-chromium'
+        env = {**os.environ, 'PATCH_BIN': os.path.abspath(Path(SRC_DIR) / 'third_party' / 'git' / 'usr' / 'bin' / 'patch.exe')}
     utils_dir = os.path.join(uc_dir, 'utils')
     sp.run([os.path.join(utils_dir, 'prune_binaries.py'),
         SRC_DIR, filter_list_file(
             uc_dir, 'pruning.list',
             excludes=['buildtools/linux64/gn'])])
     sp.check_call([os.path.join(utils_dir, 'patches.py'),
-        'apply', 'src', os.path.join(uc_dir, 'patches')])
+        'apply', 'src', os.path.join(uc_dir, 'patches')], env=env)
+    # apply Windows specific patches
+    if config.target_os == 'windows':
+        sp.check_call([os.path.join(utils_dir, 'patches.py'),
+                       'apply', 'src', 'ungoogled-chromium-windows\\patches'], env=env)
     sp.check_call([os.path.join(utils_dir, 'domain_substitution.py'),
         'apply', '-r', os.path.join(uc_dir, 'domain_regex.list'),
         '-f', filter_list_file(uc_dir, 'domain_substitution.list'),
@@ -425,6 +435,9 @@ if __name__ == "__main__":
 
     config = Config(args)
     logger.debug('config: %s', config)
+
+    if config.target_os == 'windows':
+        sp.hook()
 
     if args.command == 'init':
         init(config)
