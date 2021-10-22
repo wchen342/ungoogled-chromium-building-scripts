@@ -2,7 +2,7 @@ import os
 
 ARCH = ('arm', 'arm64', 'x86', 'x64')
 COMMAND = ('init', 'sync', 'prepare', 'build', 'clean')
-OS = ('linux', 'android')
+OS = ('linux', 'android', 'win')
 
 SRC_DIR = "src"
 OUTPUT_BASE_DIR = "out"

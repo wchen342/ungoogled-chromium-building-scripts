@@ -171,3 +171,39 @@ def git_is_shallow(repo_folder):
 
 def git_pull_submodules(repo_folder):
     sp.check_call(['git', 'submodule', 'update', '--init', '--recursive'], cwd=repo_folder)
+
+
+def _get_vcvars_path(name='64'):
+    """
+    Returns the path to the corresponding vcvars*.bat path
+
+    As of VS 2017, name can be one of: 32, 64, all, amd64_x86, x86_amd64
+    """
+    vswhere_exe = '%ProgramFiles(x86)%\\Microsoft Visual Studio\\Installer\\vswhere.exe'
+    result = sp.run(
+        '"{}" -prerelease -latest -property installationPath'.format(vswhere_exe),
+        shell=True,
+        check=True,
+        stdout=sp.PIPE,
+        universal_newlines=True)
+    vcvars_path = os.path.join(result.stdout.strip(), 'VC\\Auxiliary\\Build\\vcvars{}.bat'.format(name))
+    if not os.path.exists(vcvars_path):
+        raise RuntimeError(
+            'Could not find vcvars batch script in expected location: {}'.format(vcvars_path))
+    return vcvars_path
+
+
+def run_windows_build_process(*args, **kwargs):
+    """
+    Runs the subprocess with the correct environment variables for building
+    """
+    # Add call to set VC variables
+    cmd_input = ['call "%s" >nul' % _get_vcvars_path()]
+    cmd_input.append('set DEPOT_TOOLS_WIN_TOOLCHAIN=0')
+    cmd_input.append(' '.join(map('"{}"'.format, args)))
+    cmd_input.append('exit\n')
+    sp.run(('cmd.exe', '/k'),
+                   input='\n'.join(cmd_input),
+                   check=True,
+                   encoding='utf-8',
+                   **kwargs)

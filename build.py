@@ -5,6 +5,8 @@ import logging
 import os
 import re
 import shutil
+import sys
+
 import win_adapter as sp
 import warnings
 from io import BytesIO
@@ -14,7 +16,8 @@ from zipfile import ZipFile
 import distro
 import requests
 
-from config import OUTPUT_BASE_DIR, SRC_DIR, ARCH, OS, COMMAND, GCLIENT_CONFIG, git_pull_submodules
+from config import OUTPUT_BASE_DIR, SRC_DIR, ARCH, OS, COMMAND, GCLIENT_CONFIG, git_pull_submodules, \
+    run_windows_build_process
 from config import create_logger, shell_expand_abs_path, parse_gn_flags, filter_list_file, git_maybe_checkout, \
     git_is_shallow
 from config import Config
@@ -47,7 +50,7 @@ def init(config):
     cwd = 'depot_tools'
     print("Cloning depot_tools...")
 
-    if config.target_os == 'windows':
+    if config.target_os == 'win':
         r = requests.get('https://storage.googleapis.com/chrome-infra/depot_tools.zip')
         with ZipFile(BytesIO(r.content)) as f:
             f.extractall(cwd)
@@ -57,7 +60,7 @@ def init(config):
         On first run, gclient will install all the Windows-specific bits needed to work with the code, 
         including msysgit and python.
         """
-        gclient_path = Path(f'{cwd}\\gclient.bat')
+        gclient_path = Path(cwd + '\\gclient.bat')
         sp.check_call(['cmd', os.path.abspath(gclient_path)])
     else:
         git_maybe_checkout(
@@ -158,7 +161,7 @@ def sync(config):
     """
     Sync chromium source and run hooks.
     """
-    if config.target_os == 'windows':
+    if config.target_os == 'win':
         git_maybe_checkout(
             'https://github.com/ungoogled-software/ungoogled-chromium-windows.git',
             'ungoogled-chromium-windows')
@@ -166,7 +169,7 @@ def sync(config):
         uc_windows_dir = Path('ungoogled-chromium-windows')
 
         uc_windows_ini_path = uc_windows_dir / 'downloads.ini'
-        uc_ini_path = uc_windows_dir / 'ungoogled-chromium' / 'downloads.ini',
+        uc_ini_path = uc_windows_dir / 'ungoogled-chromium' / 'downloads.ini'
 
         downloads_cache = uc_windows_dir / 'build' / 'downloads_cache'
         downloads_cache.mkdir(parents=True, exist_ok=True)
@@ -177,10 +180,10 @@ def sync(config):
         source_tree.mkdir(parents=True, exist_ok=True)
 
         download_script = os.path.abspath(Path(uc_windows_dir / 'ungoogled-chromium' / 'utils' / 'downloads.py'))
-        sp.check_call([download_script, 'retrieve', '-c', os.path.abspath(downloads_cache), '-i', uc_ini_path, '-i', uc_windows_ini_path])
+        sp.check_call([download_script, 'retrieve', '-i', uc_ini_path, uc_windows_ini_path, '-c', os.path.abspath(downloads_cache)])
         print('Unpacking downloads...')
-        sp.check_call([download_script, 'unpack', '-c', os.path.abspath(downloads_cache),
-                       '-i', uc_ini_path, '-i', uc_windows_ini_path, os.path.abspath(source_tree)])
+        sp.check_call([download_script, 'unpack', '-i', uc_ini_path, uc_windows_ini_path,
+                       '-c', os.path.abspath(downloads_cache), os.path.abspath(source_tree)])
     else:
         # Fetch & Sync Chromium
         # Copy PATH from current process and add depot_tools to it
@@ -238,7 +241,7 @@ def prepare(config):
     TODO: re-apply patches
     TODO: add a patch list filter
     """
-    if config.target_os != 'windows':
+    if config.target_os != 'win':
         # Checkout ungoogled-chromium
         uc_git_origin = 'https://github.com/Eloston/ungoogled-chromium.git'\
             if ungoogled_chromium_origin is None else ungoogled_chromium_origin
@@ -264,7 +267,7 @@ def prepare(config):
     cwd = SRC_DIR
     env = None
     uc_dir = 'ungoogled-chromium'
-    if config.target_os == 'windows':
+    if config.target_os == 'win':
         uc_dir = 'ungoogled-chromium-windows\\ungoogled-chromium'
         env = {**os.environ, 'PATCH_BIN': os.path.abspath(Path(SRC_DIR) / 'third_party' / 'git' / 'usr' / 'bin' / 'patch.exe')}
     utils_dir = os.path.join(uc_dir, 'utils')
@@ -275,7 +278,7 @@ def prepare(config):
     sp.check_call([os.path.join(utils_dir, 'patches.py'),
         'apply', 'src', os.path.join(uc_dir, 'patches')], env=env)
     # apply Windows specific patches
-    if config.target_os == 'windows':
+    if config.target_os == 'win':
         sp.check_call([os.path.join(utils_dir, 'patches.py'),
                        'apply', 'src', 'ungoogled-chromium-windows\\patches'], env=env)
     sp.check_call([os.path.join(utils_dir, 'domain_substitution.py'),
@@ -315,10 +318,18 @@ def build(config):
 
     # Build GN args
     # ungoogled-chromium
-    with open(os.path.join('ungoogled-chromium', 'flags.gn'), 'r') as f:
+    if config.target_os == 'win':
+        flags_path = 'ungoogled-chromium-windows\\ungoogled-chromium\\flags.gn'
+    else:
+        flags_path = os.path.join('ungoogled-chromium', 'flags.gn')
+    with open(flags_path, 'r') as f:
         flags = f.readlines()
 
     gn_args = parse_gn_flags(flags)
+    if config.target_os == 'win':
+        with open('ungoogled-chromium-windows\\flags.windows.gn') as f:
+            flags_win = f.readlines()
+        gn_args.update(parse_gn_flags(flags_win))
 
     # Extra flags
     # Common flags
@@ -332,6 +343,8 @@ def build(config):
         'target_os': '"' + config.target_os + '"',
         'target_cpu': '"' + config.target_cpu + '"',
     })
+    if config.target_os == 'win':
+        gn_args['enable_resource_allowlist_generation'] = 'false'
 
     # Debug flags
     if config.debug:
@@ -368,31 +381,42 @@ def build(config):
 
     # Add depot_tools to env
     depot_tools_path = os.path.join(os.getcwd(), 'depot_tools')
-    if not os.path.exists(depot_tools_path) or not os.path.isdir(depot_tools_path):
-        raise FileNotFoundError("Cannot find depot_tools!")
-    _env = os.environ.copy()
-    _env["PATH"] = depot_tools_path + ":" + _env["PATH"]
+    if config.target_os != 'win':
+        if not os.path.exists(depot_tools_path) or not os.path.isdir(depot_tools_path):
+            raise FileNotFoundError("Cannot find depot_tools!")
+        _env = os.environ.copy()
+        _env["PATH"] = depot_tools_path + ":" + _env["PATH"]
 
-    # Run GN
-    if config.direct_download:
-        sp.check_call([
-            os.path.join(SRC_DIR, 'tools', 'gn', 'bootstrap', 'bootstrap.py'),
-            "--gn-gen-args='" + gn_args_str + "'"])
+        # Run GN
+        if config.direct_download:
+            sp.check_call([
+                os.path.join(SRC_DIR, 'tools', 'gn', 'bootstrap', 'bootstrap.py'),
+                "--gn-gen-args='" + gn_args_str + "'"])
+        else:
+            # Do not use --args. It requires all double quotes be escaped.
+            with open(os.path.join(output_src_path, 'args.gn'), 'w', encoding='utf-8') as f:
+                f.write(gn_args_str)
+            sp.check_call(['gn', 'gen', output_path, '--fail-on-unused-args'], cwd=SRC_DIR, env=_env)
+
+        # Run ninja
+        if config.target_os == 'linux':
+            targets = ['chrome', 'chrome_sandbox', 'chromedriver']
+        elif config.target_os == 'android':
+            targets = ['chrome_modern_public_bundle']
+        else:
+            raise AttributeError("Target OS not supported")
+        sp.check_call(['autoninja', '-j', str(config.num_jobs), '-C', output_path,
+            *targets], cwd=SRC_DIR, env=_env)
     else:
-        # Do not use --args. It requires all double quotes be escaped.
         with open(os.path.join(output_src_path, 'args.gn'), 'w', encoding='utf-8') as f:
             f.write(gn_args_str)
-        sp.check_call(['gn', 'gen', output_path, '--fail-on-unused-args'], cwd=SRC_DIR, env=_env)
-
-    # Run ninja
-    if config.target_os == 'linux':
-        targets = ['chrome', 'chrome_sandbox', 'chromedriver']
-    elif config.target_os == 'android':
-        targets = ['chrome_modern_public_bundle']
-    else:
-        raise AttributeError("Target OS not supported")
-    sp.check_call(['autoninja', '-j', str(config.num_jobs), '-C', output_path,
-        *targets], cwd=SRC_DIR, env=_env)
+        source_tree = os.path.abspath(Path(SRC_DIR))
+        gn_path = output_path + '\\gn.exe'
+        run_windows_build_process(
+            sys.executable, 'tools\\gn\\bootstrap\\bootstrap.py', '-o', gn_path,
+            '--skip-generate-buildfiles', cwd=source_tree)
+        run_windows_build_process(gn_path, 'gen', output_path, '--fail-on-unused-args', cwd=source_tree)
+        run_windows_build_process('third_party\\ninja\\ninja.exe', '-C', output_path, 'chrome', 'chromedriver', cwd=source_tree)
 
 
 if __name__ == "__main__":
@@ -436,7 +460,7 @@ if __name__ == "__main__":
     config = Config(args)
     logger.debug('config: %s', config)
 
-    if config.target_os == 'windows':
+    if config.target_os == 'win':
         sp.hook()
 
     if args.command == 'init':
